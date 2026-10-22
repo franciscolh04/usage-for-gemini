@@ -888,6 +888,7 @@
   }
 
   function setOpen(value, reason = "") {
+    if (value && !(current() && current().plan)) return;
     if (!chipUI || !panelHost) {
       isOpen = value;
       return;
@@ -950,7 +951,7 @@
 
   function render() {
     const data = current();
-    if (!data) {
+    if (!data || !data.plan) {
       if (chipHost) chipHost.style.display = "none";
       if (isOpen) setOpen(false);
       return;
@@ -996,7 +997,7 @@
   }
 
   function ensureMounted() {
-    if (!current()) {
+    if (!current() || !current().plan) {
       if (chipHost) chipHost.style.display = "none";
       return;
     }
@@ -1025,7 +1026,10 @@
     clearTimeout(mountTimer);
     mountTimer = setTimeout(() => {
       checkGeneration();
-      if (!current()) return;
+      if (!current() || !current().plan) {
+        if (chipHost) chipHost.style.display = "none";
+        return;
+      }
       if (!chipHost) {
         ensureMounted();
         return;
