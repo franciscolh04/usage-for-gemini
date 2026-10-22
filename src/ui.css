@@ -39,6 +39,8 @@
   --ufg-track: #e1e5ea;
   --ufg-mid: #b06000;
   --ufg-high: #d93025;
+  --ufg-plan-bg: #f1f3f4;
+  --ufg-plan-text: #5f6368;
 }
 
 :host([data-theme="dark"]) {
@@ -51,6 +53,8 @@
   --ufg-track: #3c4043;
   --ufg-mid: #fdd663;
   --ufg-high: #ff5252;
+  --ufg-plan-bg: #303134;
+  --ufg-plan-text: #c4c7c5;
 }
 
 .ufg {
@@ -277,15 +281,19 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  padding: 3px 8px;
+  padding: 4px 8px;
   border-radius: 8px;
-  background: var(--ufg-surface-2);
-  font-size: 11px;
+  background: var(--ufg-plan-bg);
+  font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.06em;
-  line-height: 1;
+  line-height: 16px;
   text-transform: uppercase;
-  color: var(--ufg-muted);
+  color: var(--ufg-plan-text);
+}
+
+.ufg-plan:empty {
+  display: none;
 }
 
 .ufg-row + .ufg-row {

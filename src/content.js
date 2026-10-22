@@ -2,8 +2,20 @@
   if (window.__ufgContent) return;
   window.__ufgContent = true;
 
-  const SOURCE = "usage-for-gemini";
   const STORAGE_KEY = "ufg:snapshot";
+  const USAGE_REFRESH_MS = 5 * 60 * 1000;
+  const STOP_SELECTOR = [
+    'button[aria-label*="stop" i]',
+    'button[aria-label*="parar" i]',
+    'button[aria-label*="detener" i]',
+    'button[aria-label*="arrêter" i]',
+    'button[aria-label*="stopper" i]',
+    'button[aria-label*="停止" i]',
+    '[data-testid*="stop" i]',
+    'mat-icon[fonticon="stop"]',
+    'gem-icon[name="stop"]',
+    '[class*="stop-button" i]',
+  ].join(",");
   const DEMO =
     new URLSearchParams(location.search).has("ufg_demo") ||
     localStorage.getItem("ufg:demo") === "1";
@@ -27,6 +39,7 @@
   let L = i18n.get(locale);
 
   let snapshot = null;
+  let snapshotAccount = "0";
   let demo = null;
   let composer = null;
   let composerInput = null;
@@ -41,6 +54,11 @@
   let mountTimer = 0;
   let themeTimer = 0;
   let warned = false;
+  let usageTimer = 0;
+  let usageInFlight = null;
+  let usageQueued = false;
+  let lastUsageFetch = 0;
+  let wasGenerating = false;
 
   const account = () => (location.pathname.match(/\/u\/(\d+)/) || [])[1] || "0";
 
@@ -61,6 +79,294 @@
       return demo;
     }
     return null;
+  }
+
+  function usagePaths() {
+    const id = account();
+    return id === "0" ? ["/usage"] : [`/u/${id}/usage`, "/usage"];
+  }
+
+  function toEpoch(value) {
+    if (typeof value === "number") return value < 1e12 ? value * 1000 : value;
+    const parsed = Date.parse(value || "");
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function planFromTier(tier) {
+    if (!tier) return "";
+    const value = String(tier).toUpperCase();
+    if (value === "TIER2" || value === "TIER_NEON" || value.includes("ULTRA")) return "ULTRA";
+    if (value === "TIER_HELIUM" || value.includes("PLUS")) return "PLUS";
+    if (value === "TIER1" || value.includes("PRO") || value.includes("PREMIUM")) return "PRO";
+    if (value.includes("FREE") || value.includes("BASIC")) return "FREE";
+    return "";
+  }
+
+  function poolWindow(pool) {
+    const pct = Math.max(0, Math.min(100, Math.round(pool.percentageUsed * 100)));
+    const resetsAt = toEpoch(pool.gxu?.windowRefreshesAt);
+    return resetsAt ? { pct, resetsAt } : { pct };
+  }
+
+  function poolsToUsage(state) {
+    const session = state.pools.find((pool) => pool.poolType === "GXU_FIVE_HOURLY");
+    const weekly = state.pools.find((pool) => pool.poolType === "GXU_WEEKLY");
+    if (!session && !weekly) return null;
+    const usage = {};
+    if (session) usage.session = poolWindow(session);
+    if (weekly) usage.weekly = poolWindow(weekly);
+    const plan = planFromTier(state.tier);
+    if (plan) usage.plan = plan;
+    return usage;
+  }
+
+  function collectUsageData(value, state, depth = 0) {
+    if (!value || depth > 24) return;
+    if (typeof value === "string") {
+      if (value.length > 1 && value.length < 2000000 && value.includes("percentageUsed")) {
+        try {
+          collectUsageData(JSON.parse(value), state, depth + 1);
+        } catch {}
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) collectUsageData(item, state, depth + 1);
+      return;
+    }
+    if (typeof value !== "object") return;
+    if (typeof value.subscriptionTier === "string" && !state.tier) {
+      state.tier = value.subscriptionTier;
+    }
+    if (
+      value.poolType &&
+      typeof value.percentageUsed === "number" &&
+      !state.pools.some((pool) => pool.poolType === value.poolType)
+    ) {
+      state.pools.push(value);
+    }
+    for (const key of Object.keys(value)) {
+      collectUsageData(value[key], state, depth + 1);
+    }
+  }
+
+  function extractUsageFromHtml(html) {
+    if (!html.includes("percentageUsed")) return null;
+    let doc;
+    try {
+      doc = new DOMParser().parseFromString(html, "text/html");
+    } catch {
+      return null;
+    }
+    const state = { pools: [], tier: "" };
+    for (const script of doc.querySelectorAll("script[data-bg3-relay-preload]")) {
+      let data;
+      try {
+        data = JSON.parse(script.textContent);
+      } catch {
+        continue;
+      }
+      collectUsageData(data, state);
+      if (state.pools.length >= 2) break;
+    }
+    return poolsToUsage(state);
+  }
+
+  function toAsciiDigits(text) {
+    return text.replace(/\p{Nd}/gu, (char) => {
+      const code = char.codePointAt(0);
+      let zero = code;
+      while (zero > 0 && /\p{Nd}/u.test(String.fromCodePoint(zero - 1))) zero--;
+      return String(code - zero);
+    });
+  }
+
+  function parsePercentText(text) {
+    const match = toAsciiDigits(String(text)).match(/(\d+(?:[.,]\d+)?)\s*[%٪]/);
+    if (!match) return null;
+    const value = Number(match[1].replace(",", "."));
+    if (!Number.isFinite(value)) return null;
+    return Math.max(0, Math.min(100, Math.round(value)));
+  }
+
+  function sectionUsage(doc, testId) {
+    const section = doc.querySelector(`[data-testid="${testId}"]`);
+    if (!section) return null;
+    const texts = [...section.querySelectorAll("*")]
+      .filter((element) => !element.children.length && element.textContent.trim())
+      .map((element) => element.textContent.trim());
+    const pctText = texts.find((text) => parsePercentText(text) !== null);
+    if (!pctText) return null;
+    const pct = parsePercentText(pctText);
+    const resetText =
+      texts
+        .filter((text) => parsePercentText(text) === null && /\p{Nd}/u.test(text))
+        .pop() || "";
+    return resetText ? { pct, resetText } : { pct };
+  }
+
+  function extractUsageFromDocument(doc) {
+    const session = sectionUsage(doc, "current-usage");
+    const weekly = sectionUsage(doc, "weekly-usage");
+    if (!session && !weekly) return null;
+    return {
+      ...(session ? { session } : {}),
+      ...(weekly ? { weekly } : {}),
+    };
+  }
+
+  function loadUsageFramePath(path) {
+    return new Promise((resolve) => {
+      if (!document.body) {
+        resolve(null);
+        return;
+      }
+      const frame = document.createElement("iframe");
+      frame.src = `${path}${path.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      frame.tabIndex = -1;
+      frame.setAttribute("aria-hidden", "true");
+      Object.assign(frame.style, {
+        position: "fixed",
+        left: "-10000px",
+        top: "0",
+        width: "1px",
+        height: "1px",
+        border: "0",
+        opacity: "0",
+        pointerEvents: "none",
+      });
+      let done = false;
+      let attempts = 0;
+      let poll = 0;
+      let timeout = 0;
+      const finish = (result) => {
+        if (done) return;
+        done = true;
+        clearInterval(poll);
+        clearTimeout(timeout);
+        frame.remove();
+        resolve(result);
+      };
+      const check = () => {
+        let doc;
+        try {
+          doc = frame.contentDocument;
+        } catch {
+          finish(null);
+          return;
+        }
+        if (!doc || doc.readyState === "loading") return;
+        const usage = extractUsageFromDocument(doc);
+        if (usage) {
+          finish(usage);
+          return;
+        }
+        if (++attempts >= 34) finish(null);
+      };
+      frame.addEventListener("load", check);
+      document.body.append(frame);
+      poll = setInterval(check, 300);
+      timeout = setTimeout(() => finish(null), 11000);
+    });
+  }
+
+  async function loadUsageFrame() {
+    for (const path of usagePaths()) {
+      const usage = await loadUsageFramePath(path);
+      if (usage) return usage;
+    }
+    return null;
+  }
+
+  async function fetchUsageFromPage() {
+    for (const path of usagePaths()) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        let response;
+        try {
+          response = await fetch(`${path}${path.includes("?") ? "&" : "?"}t=${Date.now()}`, {
+            credentials: "same-origin",
+            cache: "no-store",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+        if (!response || !response.ok) continue;
+        const usage = extractUsageFromHtml(await response.text());
+        if (usage) return usage;
+      } catch {}
+    }
+    return null;
+  }
+
+  function applyUsage(usage) {
+    const previous = snapshot || {};
+    snapshot = {
+      ...previous,
+      ...usage,
+      session: usage.session || previous.session,
+      weekly: usage.weekly || previous.weekly,
+      plan: usage.plan || previous.plan || "",
+    };
+    snapshotAccount = account();
+    try {
+      chrome.storage.local.set({
+        [STORAGE_KEY]: { ...snapshot, account: snapshotAccount },
+      });
+    } catch {}
+    if (!chipHost || !chipUI || !panelHost) ensureMounted();
+    else render();
+  }
+
+  function requestUsageRefresh(delay = 0) {
+    if (DEMO) return;
+    clearTimeout(usageTimer);
+    const elapsed = lastUsageFetch ? Date.now() - lastUsageFetch : Infinity;
+    const wait = Math.max(delay, elapsed < 15000 ? 15000 - elapsed : 0);
+    usageTimer = setTimeout(refreshUsage, wait);
+  }
+
+  function refreshUsage() {
+    if (DEMO) return Promise.resolve();
+    if (usageInFlight) {
+      usageQueued = true;
+      return usageInFlight;
+    }
+    usageInFlight = (async () => {
+      lastUsageFetch = Date.now();
+      let usage = await fetchUsageFromPage();
+      if (!usage) usage = await loadUsageFrame();
+      if (usage) {
+        applyUsage(usage);
+        return;
+      }
+      if (!snapshot) requestUsageRefresh(30000);
+    })()
+      .catch(() => {})
+      .finally(() => {
+        usageInFlight = null;
+        if (usageQueued) {
+          usageQueued = false;
+          requestUsageRefresh(1500);
+        }
+      });
+    return usageInFlight;
+  }
+
+  function isGenerating() {
+    try {
+      return [...document.querySelectorAll(STOP_SELECTOR)].some(isVisible);
+    } catch {
+      return false;
+    }
+  }
+
+  function checkGeneration() {
+    const generating = isGenerating();
+    if (wasGenerating && !generating) requestUsageRefresh(1200);
+    wasGenerating = generating;
   }
 
   const formatCache = new Map();
@@ -595,6 +901,7 @@
     clearTimeout(closeTimer);
     closeTimer = 0;
     if (value) {
+      if (Date.now() - lastUsageFetch > 60000) requestUsageRefresh(0);
       panelUI.wrap.classList.remove("ufg--closing");
       if (!panelHost.isConnected) document.body.append(panelHost);
       panelHost.style.display = "block";
@@ -629,14 +936,16 @@
     if (!data || !panelUI) return;
     const sessionReset = data.session?.resetsAt;
     const weeklyReset = data.weekly?.resetsAt;
-    panelUI.session.reset.textContent = sessionReset
-      ? L.resetAt.replace("{time}", formatTime(sessionReset))
-      : "";
-    panelUI.weekly.reset.textContent = weeklyReset
-      ? L.resetOn
-          .replace("{date}", formatDate(weeklyReset))
-          .replace("{time}", formatTime(weeklyReset))
-      : "";
+    panelUI.session.reset.textContent =
+      data.session?.resetText ||
+      (sessionReset ? L.resetAt.replace("{time}", formatTime(sessionReset)) : "");
+    panelUI.weekly.reset.textContent =
+      data.weekly?.resetText ||
+      (weeklyReset
+        ? L.resetOn
+            .replace("{date}", formatDate(weeklyReset))
+            .replace("{time}", formatTime(weeklyReset))
+        : "");
   }
 
   function render() {
@@ -702,8 +1011,9 @@
         .get(STORAGE_KEY)
         .then((result) => {
           const saved = result && result[STORAGE_KEY];
-          if (saved && saved.account === account()) {
+          if (saved && saved.account === account() && !snapshot) {
             snapshot = saved;
+            snapshotAccount = saved.account;
             render();
           }
         })
@@ -714,6 +1024,7 @@
   const observer = new MutationObserver(() => {
     clearTimeout(mountTimer);
     mountTimer = setTimeout(() => {
+      checkGeneration();
       if (!current()) return;
       if (!chipHost) {
         ensureMounted();
@@ -771,28 +1082,19 @@
   setInterval(() => {
     if (location.href !== lastHref) {
       lastHref = location.href;
-      snapshot = null;
+      if (snapshot && snapshotAccount !== account()) snapshot = null;
       composer = findComposer();
       render();
       loadSaved();
+      if (!snapshot) requestUsageRefresh(500);
     }
+    checkGeneration();
     applyTheme();
     if (isOpen) tick();
   }, 1000);
 
-  window.addEventListener("message", (event) => {
-    if (event.source !== window || event.origin !== location.origin) return;
-    const data = event.data;
-    if (!data || data.source !== SOURCE || data.kind !== "capture") return;
-    const parsed = extractUsage(data.body);
-    if (!parsed) return;
-    snapshot = parsed;
-    try {
-      chrome.storage.local.set({
-        [STORAGE_KEY]: { ...parsed, account: account() },
-      });
-    } catch {}
-    render();
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && Date.now() - lastUsageFetch > 60000) requestUsageRefresh(0);
   });
 
   try {
@@ -801,14 +1103,11 @@
       const next = changes[STORAGE_KEY].newValue;
       if (next && next.account === account()) {
         snapshot = next;
+        snapshotAccount = next.account;
         render();
       }
     });
   } catch {}
-
-  function extractUsage() {
-    return null;
-  }
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", ensureMounted, { once: true });
@@ -816,4 +1115,6 @@
     ensureMounted();
   }
   loadSaved();
+  requestUsageRefresh(400);
+  setInterval(() => requestUsageRefresh(0), USAGE_REFRESH_MS);
 })();
