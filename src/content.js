@@ -13,10 +13,12 @@
     get: () => ({
       locale: "en",
       rtl: false,
-      usage: "Usage",
-      session: "Session",
-      weekly: "Weekly",
-      resets: "Resets in",
+      usage: "Usage limits",
+      session: "Current usage",
+      weekly: "Weekly limit",
+      resetAt: "Resets at {time}",
+      resetOn: "Resets on {date} at {time}",
+      used: "{value} used",
       aria: "Gemini usage: {value}",
     }),
   };
@@ -45,7 +47,7 @@
   function createDemo() {
     const now = Date.now();
     return {
-      session: { pct: 47, resetsAt: now + 245 * 60000 },
+      session: { pct: 100, resetsAt: now + 245 * 60000 },
       weekly: { pct: 13, resetsAt: now + 7460 * 60000 },
       plan: "Pro",
       demo: true,
@@ -81,39 +83,28 @@
     return numberFormat({ style: "percent", maximumFractionDigits: 0 }).format((pct || 0) / 100);
   }
 
-  const UNIT_DISPLAY = {
-    en: "narrow",
-    id: "long",
-    lo: "long",
-    ml: "long",
-    ms: "long",
-    zu: "long",
-  };
+  const dateTimeCache = new Map();
 
-  function unit(unit, value) {
-    return numberFormat({
-      style: "unit",
-      unit,
-      unitDisplay: UNIT_DISPLAY[locale.split("-")[0]] || "short",
-      maximumFractionDigits: 0,
-    }).format(value);
+  function dateTimeFormat(options) {
+    const key = `${locale}:${JSON.stringify(options)}`;
+    let formatter = dateTimeCache.get(key);
+    if (!formatter) {
+      try {
+        formatter = new Intl.DateTimeFormat(locale, options);
+      } catch {
+        formatter = new Intl.DateTimeFormat("en", options);
+      }
+      dateTimeCache.set(key, formatter);
+    }
+    return formatter;
   }
 
-  function formatDuration(timestamp) {
-    if (!timestamp) return "";
-    const diff = Math.max(0, timestamp - Date.now());
-    const mins = Math.floor(diff / 60000);
-    const hours = Math.floor(mins / 60);
-    const days = Math.floor(hours / 24);
-    if (days >= 1) {
-      const rest = hours % 24;
-      return rest ? `${unit("day", days)} ${unit("hour", rest)}` : unit("day", days);
-    }
-    if (hours >= 1) {
-      const rest = mins % 60;
-      return rest ? `${unit("hour", hours)} ${unit("minute", rest)}` : unit("hour", hours);
-    }
-    return unit("minute", mins);
+  function formatTime(timestamp) {
+    return dateTimeFormat({ hour: "numeric", minute: "2-digit" }).format(timestamp);
+  }
+
+  function formatDate(timestamp) {
+    return dateTimeFormat({ day: "2-digit", month: "2-digit" }).format(timestamp);
   }
 
   function applyLanguage() {
@@ -345,7 +336,7 @@
 
   function insertInline(row, micChild) {
     const rowRect = row.getBoundingClientRect();
-    const size = rowRect.height && rowRect.height < 28 ? 24 : 28;
+    const size = rowRect.height && rowRect.height < 28 ? 24 : 32;
     chipHost.dataset.mode = "inline";
     chipHost.style.left = "";
     chipHost.style.top = "";
@@ -368,7 +359,7 @@
       hideChip();
       return;
     }
-    const size = gap >= 34 ? 28 : gap >= 30 ? 26 : 24;
+    const size = gap >= 38 ? 32 : gap >= 34 ? 30 : gap >= 30 ? 28 : gap >= 26 ? 26 : 24;
     const centerX = a.right + gap / 2;
     const centerY = (centerA + centerB) / 2;
     chipHost.dataset.mode = "fixed";
@@ -636,11 +627,15 @@
   function tick() {
     const data = current();
     if (!data || !panelUI) return;
-    panelUI.session.reset.textContent = data.session?.resetsAt
-      ? `${L.resets} ${formatDuration(data.session.resetsAt)}`
+    const sessionReset = data.session?.resetsAt;
+    const weeklyReset = data.weekly?.resetsAt;
+    panelUI.session.reset.textContent = sessionReset
+      ? L.resetAt.replace("{time}", formatTime(sessionReset))
       : "";
-    panelUI.weekly.reset.textContent = data.weekly?.resetsAt
-      ? `${L.resets} ${formatDuration(data.weekly.resetsAt)}`
+    panelUI.weekly.reset.textContent = weeklyReset
+      ? L.resetOn
+          .replace("{date}", formatDate(weeklyReset))
+          .replace("{time}", formatTime(weeklyReset))
       : "";
   }
 
@@ -672,8 +667,8 @@
     chipUI.chipFill.dataset.level = level(sessionPct);
 
     panelUI.plan.textContent = data.plan || "";
-    panelUI.session.val.textContent = sessionValue;
-    panelUI.weekly.val.textContent = weeklyValue;
+    panelUI.session.val.textContent = L.used.replace("{value}", sessionValue);
+    panelUI.weekly.val.textContent = L.used.replace("{value}", weeklyValue);
     setBar(panelUI.session.fill, sessionPct);
     setBar(panelUI.weekly.fill, weeklyPct);
 
@@ -794,7 +789,7 @@
     snapshot = parsed;
     try {
       chrome.storage.local.set({
-        [STORAGE_KEY]: { ...parsed, account: account(), at: Date.now() },
+        [STORAGE_KEY]: { ...parsed, account: account() },
       });
     } catch {}
     render();

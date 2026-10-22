@@ -6,8 +6,8 @@
   position: fixed;
   display: block;
   z-index: 2147483645;
-  width: var(--ufg-size, 28px);
-  height: var(--ufg-size, 28px);
+  width: var(--ufg-size, 32px);
+  height: var(--ufg-size, 32px);
 }
 
 :host([data-kind="chip"][data-mode="inline"]) {
@@ -38,7 +38,7 @@
   --ufg-accent: #0b57d0;
   --ufg-track: #e1e5ea;
   --ufg-mid: #b06000;
-  --ufg-high: #c5221f;
+  --ufg-high: #d93025;
 }
 
 :host([data-theme="dark"]) {
@@ -50,7 +50,7 @@
   --ufg-accent: #a8c7fa;
   --ufg-track: #3c4043;
   --ufg-mid: #fdd663;
-  --ufg-high: #f28b82;
+  --ufg-high: #ff5252;
 }
 
 .ufg {
@@ -119,7 +119,7 @@
 .ufg-ring-track,
 .ufg-ring-fill {
   fill: none;
-  stroke-width: 2.5;
+  stroke-width: 2;
 }
 
 .ufg-ring-track {
@@ -180,7 +180,7 @@
 
 .ufg-pct {
   position: relative;
-  font-size: calc(var(--ufg-size, 28px) * 0.33);
+  font-size: calc(var(--ufg-size, 32px) * 0.35625);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
@@ -188,7 +188,7 @@
 }
 
 .ufg-pct--small {
-  font-size: calc(var(--ufg-size, 28px) * 0.285);
+  font-size: calc(var(--ufg-size, 32px) * 0.3);
 }
 
 .ufg-panel {
@@ -263,16 +263,19 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   margin: 0 2px 12px;
 }
 
 .ufg-title {
+  min-width: 0;
   font-size: 15px;
   font-weight: 500;
 }
 
 .ufg-plan {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   padding: 3px 8px;
   border-radius: 8px;
